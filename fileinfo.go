@@ -11,6 +11,7 @@ import "time"
 import "io"
 import "io/fs"
 import "path/filepath"
+import "github.com/google/renameio"
 
 type FileInfo struct {
 	Size          int64
@@ -232,7 +233,24 @@ func (cache FileInfoCache) FullHashFiles(candidates []string, sleep time.Duratio
 			bar.Finish()
 		}()
 	}
+
+	// remove candidates that are already hashed
+	remaining_candidates := []string{}
 	for _, f := range candidates {
+		info := cache.Files[f]
+		// Check if we need to even do anythong
+		if info.FullHash != 0 {
+			result = append(result, f)
+			if log.IsLevelEnabled(log.InfoLevel) {
+				bar.Add64(info.Size)
+			}
+			continue
+		} else {
+			remaining_candidates = append(remaining_candidates, f)
+		}
+	}
+
+	for _, f := range remaining_candidates {
 		info := cache.Files[f]
 		// Check if we need to even do anythong
 		if info.FullHash != 0 {
@@ -279,17 +297,21 @@ func (cache FileInfoCache) Save() error {
 	if cache.Path == "" {
 		return nil
 	}
-	handle, err := os.Create(cache.Path)
+
+	t, err := renameio.TempFile("", cache.Path)
+
 	if err != nil {
-		log.Fatalf("Could not open cache file: %s", err)
+		return err
 	}
-	defer func() {
-		handle.Close()
-	}()
-	enc := gob.NewEncoder(handle)
+
+	defer t.Cleanup()
+
+	enc := gob.NewEncoder(t)
+
 	if err = enc.Encode(cache.Files); err != nil {
 		log.Error("Could not encode cache data: ", err)
 		return err
 	}
-	return nil
+
+	return t.CloseAtomicallyReplace()
 }

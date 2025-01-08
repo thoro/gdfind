@@ -1,18 +1,21 @@
 package main
 
-import "encoding/csv"
-import "sort"
-import "fmt"
-import "os"
-import "time"
-import "flag"
-import log "github.com/sirupsen/logrus"
+import (
+	"os/signal"
+	"encoding/csv"
+	"sort"
+	"fmt"
+	"os"
+	"time"
+	"flag"
+	log "github.com/sirupsen/logrus"
+)
 
 func main() {
 	var minSize, headBytes, tailBytes int64
 	var ioSleep time.Duration
 	var err error
-	var dryRun bool
+	var dryRun,mergeCache bool
 	var logLevel, action, output, cachePath string
 	flag.Int64Var(&minSize, "minsize", 1, "Ignore files with less than N `bytes`")
 	flag.Int64Var(&headBytes, "head-bytes", 64, "Read N `bytes` from the start of files")
@@ -23,6 +26,7 @@ func main() {
 	flag.StringVar(&output, "output", "", "Write actions to `file`")
 	flag.StringVar(&cachePath, "cache", "", "Cache data to `file`. Note that changing -{head,tail}-bytes does not yyet properly invalidate the cache")
 	flag.BoolVar(&dryRun, "dry-run", false, "Don't actually make any changes, just print actions")
+	flag.BoolVar(&mergeCache, "merge-cache", false, "Instead of searching files, merge cache files passed directly as args. First arg is the base path for the --cache, second arg the cache to be merged, third arg the base path that should be replaced")
 
 	flag.Parse()
 	switch logLevel {
@@ -42,6 +46,21 @@ func main() {
 		log.Fatal("No paths provided")
 		os.Exit(1)
 	}
+
+	if mergeCache {
+		if flag.NArg() != 3 {
+			log.Fatal("Provide exactly one cache to merge")
+			os.Exit(1)
+		}
+
+		err := merge(cachePath, flag.Arg(0), flag.Arg(1), flag.Arg(2))
+
+		if err != nil {
+			log.Fatalf("Error merging caches: %s", err)
+		}
+		os.Exit(0)
+	}
+
 	if dryRun {
 		log.Info("Running in dry run mode")
 	}
@@ -49,6 +68,24 @@ func main() {
 	// Initial scan
 	var candidates []string      // A list of paths of potential candidates
 	cache := NewCache(cachePath) // Holds the interesting file information, may not actually make it to the disk
+
+	// Catch SIGINT, so we can save the file one last time
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+
+	go func(){
+	    for range c {
+	        // sig is a ^C, handle it
+	        err := cache.Save()
+	        if err != nil {
+	        	log.Fatalf("Error saving cache file: %s", err)
+	        	os.Exit(1)
+	        }
+
+	        log.Info("Saved file")
+	        os.Exit(0)
+	    }
+	}()
 
 	for i := 0; i < flag.NArg(); i++ {
 		dirCandidates, err := cache.ScanDir(flag.Arg(i), minSize, time.Duration(0))
